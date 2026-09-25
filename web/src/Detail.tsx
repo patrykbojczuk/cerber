@@ -144,6 +144,18 @@ function applyViewed(root: HTMLElement, viewed: Set<string>, peeked: Set<string>
   });
 }
 
+/**
+ * Folding a file while its header is pinned would leave you somewhere in the
+ * files after it, so land back on its header.
+ */
+function keepFileInView(file: HTMLElement | null, head: HTMLElement | null): void {
+  if (!file || !head) return;
+  // The file's top above the header's sticky line means the header is pinned.
+  if (file.getBoundingClientRect().top < parseFloat(getComputedStyle(head).top)) {
+    requestAnimationFrame(() => file.scrollIntoView({ block: "start" }));
+  }
+}
+
 /** The "Viewed" box a file header carries, as GitHub has it. */
 function viewedBox(path: string): HTMLLabelElement {
   const label = document.createElement("label");
@@ -384,7 +396,10 @@ function DiffGroup({
         return;
       }
       // The label's own click is re-fired on the box; only the box's counts.
+      const wrapper = target.closest<HTMLElement>(".d2h-file-wrapper");
       if (target instanceof HTMLInputElement && target.dataset.viewedPath) {
+        // Already flipped by the click: checked now means it is about to fold.
+        if (target.checked) keepFileInView(wrapper, wrapper?.querySelector(".d2h-file-header") ?? null);
         viewedRef.current.onToggleViewed(target.dataset.viewedPath);
         return;
       }
@@ -392,6 +407,7 @@ function DiffGroup({
       // A folded file opens from its header, without losing its tick.
       const folded = target.closest(".d2h-file-header")?.closest<HTMLElement>(".file-viewed-on");
       if (folded?.dataset.path) {
+        keepFileInView(wrapper, wrapper?.querySelector(".d2h-file-header") ?? null);
         viewedRef.current.onTogglePeek(folded.dataset.path);
         return;
       }
@@ -609,6 +625,8 @@ function MarkdownFile({
   viewedState: ViewedState;
 }) {
   const [pick, setPick] = useState<LinePick | null>(null);
+  const fileEl = useRef<HTMLDivElement | null>(null);
+  const headEl = useRef<HTMLDivElement | null>(null);
   const viewed = viewedState.viewed.has(path);
   const folded = viewed && !viewedState.peeked.has(path);
 
@@ -635,11 +653,13 @@ function MarkdownFile({
   }, [doc, comments]);
 
   return (
-    <div className="md-file">
+    <div className="md-file" ref={fileEl}>
       <div
+        ref={headEl}
         className={`md-file-head${viewed ? " md-file-head-viewed" : ""}${folded ? " md-file-head-folded" : ""}`}
         onClick={(e) => {
           if (viewed && !(e.target as HTMLElement).closest("button, label")) {
+            keepFileInView(fileEl.current, headEl.current);
             viewedState.onTogglePeek(path);
           }
         }}
@@ -661,7 +681,10 @@ function MarkdownFile({
           <input
             type="checkbox"
             checked={viewed}
-            onChange={() => viewedState.onToggleViewed(path)}
+            onChange={() => {
+              if (!viewed) keepFileInView(fileEl.current, headEl.current);
+              viewedState.onToggleViewed(path);
+            }}
           />{" "}
           Viewed
         </label>
@@ -1053,9 +1076,9 @@ function ChapterSection({
   readOnly,
   anchorRef,
   flash,
+  viewedState,
   sticky,
   stuck,
-  viewedState,
 }: {
   chapter: Chapter;
   n: number;
@@ -1075,11 +1098,11 @@ function ChapterSection({
   chatBusy: boolean;
   readOnly: boolean;
   anchorRef: (el: HTMLElement | null) => void;
+  viewedState: ViewedState;
   /** The title stays pinned while the chapter scrolls under it. */
   sticky: boolean;
   /** The title is pinned right now — the chapter's top has scrolled past. */
   stuck: boolean;
-  viewedState: ViewedState;
 }) {
   const [about, setAbout] = useState(false);
   useEffect(() => {
@@ -1087,6 +1110,22 @@ function ChapterSection({
   }, [stuck]);
   const pinned = sticky && stuck && open;
   const sectionEl = useRef<HTMLElement | null>(null);
+  const headEl = useRef<HTMLElement | null>(null);
+  // File headers pin under the title, which grows as it wraps or opens its
+  // explanation.
+  useEffect(() => {
+    const section = sectionEl.current;
+    const head = headEl.current;
+    if (!sticky || !section || !head) return;
+    const apply = () => section.style.setProperty("--chapter-head-h", `${head.offsetHeight}px`);
+    apply();
+    const observer = new ResizeObserver(apply);
+    observer.observe(head);
+    return () => {
+      observer.disconnect();
+      section.style.removeProperty("--chapter-head-h");
+    };
+  }, [sticky]);
   // Folding a pinned chapter removes everything above the fold line you had
   // scrolled past, so without this you'd land somewhere in a later chapter.
   const toggle = () => {
@@ -1126,6 +1165,7 @@ function ChapterSection({
       }}
     >
       <header
+        ref={headEl}
         className={`chapter-head${sticky ? " chapter-head-sticky" : ""}${pinned ? " chapter-head-stuck" : ""}`}
         onClick={toggle}
       >
@@ -2640,7 +2680,7 @@ export function Detail({ reviewKey }: { reviewKey: string }) {
                 return (
                   <div key={ch.id} className="rail-group">
                     <button
-                      className={`rail-item${isOpen(ch.id) ? " rail-item-on" : ""}${here?.id === ch.id ? " rail-item-here" : ""}${done ? " rail-item-done" : ""}`}
+                      className={`rail-item${isOpen(ch.id) ? " rail-item-on" : ""}${done ? " rail-item-done" : ""}${here?.id === ch.id ? " rail-item-here" : ""}`}
                       onClick={() => goChapter(i)}
                     >
                       <span className="grow">
@@ -2773,9 +2813,9 @@ export function Detail({ reviewKey }: { reviewKey: string }) {
               chatBusy={chatBusy}
               readOnly={readOnly}
               flash={flash}
+              viewedState={viewedState}
               sticky={stickyChapters}
               stuck={here?.id === ch.id && here.stuck}
-              viewedState={viewedState}
               anchorRef={(el) => {
                 if (el) chapterEls.current.set(ch.id, el);
                 else chapterEls.current.delete(ch.id);
