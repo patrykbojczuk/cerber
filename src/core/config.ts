@@ -4,6 +4,8 @@ import { z } from "zod";
 import { cerberHome } from "./state.js";
 import { TrustRuleError, parseTrustRule } from "./trust.js";
 
+export const MAX_INTERVAL_MINUTES = 1440;
+
 /**
  * `~/.cerber/config.json` — everything cerber lets you decide, in one file the
  * cockpit can write and you can still edit by hand. Absent means defaults, so
@@ -24,16 +26,42 @@ export const DaemonConfigSchema = z.object({
   /** Draft an AI review for whatever lands in the queue. Never sends. */
   autoReview: z.boolean().default(true),
   /**
+   * Per-repo exceptions to `autoReview`, either way: `false` leaves that repo's
+   * PRs waiting for a click, `true` drafts them even with `autoReview` off.
+   * Resolved by `autoReviewFor` in core/autoreview.ts.
+   */
+  autoReviewRepos: z
+    .record(z.string().regex(/^[\w.-]+\/[\w.-]+$/, "expected owner/repo"), z.boolean())
+    // The match ignores case, so two spellings of one repo would leave the
+    // answer to key order — refused, like any other key that can't mean one thing.
+    .superRefine((repos, ctx) => {
+      const seen = new Map<string, string>();
+      for (const key of Object.keys(repos)) {
+        const first = seen.get(key.toLowerCase());
+        if (first !== undefined) ctx.addIssue({ code: "custom", path: [key], message: `same repo as ${first}` });
+        else seen.set(key.toLowerCase(), key);
+      }
+    })
+    .default({}),
+  /**
    * Tap this machine's notification centre when a PR is worth coming back for
    * — the draft landing, or the arrival itself when nothing is going to be
    * drafted (`isNews` in `core/notify.ts`). The cockpit's bell needs a tab open
    * and permitted; this one only needs `serve` running, which is the point.
    */
   notify: z.boolean().default(true),
-  intervalMinutes: z.number().int().positive().default(5),
+  /** Capped at a day: past ~25 days Node's setTimeout overflows and fires at once. */
+  intervalMinutes: z.number().int().positive().max(MAX_INTERVAL_MINUTES).default(5),
   parallel: z.number().int().positive().default(3),
   /** Repos to watch (owner/repo). Empty = everything your gh account can see. */
   repos: z.array(z.string()).default([]),
+  /**
+   * Your own PRs with no activity for longer than this many days are left out
+   * of the inbox — applied in the author search itself (`updated:>=`), so they
+   * never arrive and never take a slot of its 50. 0 or null turns the cut off.
+   * Your own PRs only: a review somebody asked you for is never aged out.
+   */
+  ownPrMaxAgeDays: z.number().int().nonnegative().nullable().default(30),
 });
 export type DaemonConfig = z.infer<typeof DaemonConfigSchema>;
 
